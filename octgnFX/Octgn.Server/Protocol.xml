@@ -5,6 +5,10 @@
     <param name="msg" type="string" />
   </msg>
 
+  <msg name="Kick" client="true">
+    <param name="reason" type="string"/>
+  </msg>
+
   <msg name="Hello" server="true">
     <param name="nick" type="string" />
     <param name="pkey" type="ulong" />
@@ -13,9 +17,24 @@
     <param name="octgnVer" type="Version" />
     <param name="gameId" type="Guid" />
     <param name="gameVersion" type="Version" />
+    <param name="password" type="string"/>
+    <param name="spectator" type="bool"/>
+  </msg>
+  <msg name="HelloAgain" server="true">
+    <param name="pid" type="byte"/>
+    <param name="nick" type="string" />
+    <param name="pkey" type="ulong" />
+    <param name="client" type="string" />
+    <param name="clientVer" type="Version" />
+    <param name="octgnVer" type="Version" />
+    <param name="gameId" type="Guid" />
+    <param name="gameVersion" type="Version" />
+    <param name="password" type="string"/>
   </msg>
   <msg name="Welcome" client="true">
     <param name="id" type="byte" />
+    <param name="gameSessionId" type="Guid"/>
+    <param name="waitForGameState" type="bool"/>
   </msg>
   <msg name="Settings" server="true" client="true">
     <param name="twoSidedTable" type="bool" />
@@ -28,8 +47,9 @@
     <param name="id" type="byte" />
     <param name="nick" type="string" />
     <param name="pkey" type="ulong" />
+    <param name="tableSide" type="bool"/>
   </msg>
-  <msg name="Leave" client="true">
+  <msg name="Leave" client="true" server="true">
     <param name="player" type="Player" />
   </msg>
 
@@ -132,7 +152,7 @@
     <param name="faceUp" type="bool" />
     <param name="persist" type="bool" />
   </msg>
-  <msg name="CreateAlias" server="true" client="true">
+  <msg name="CreateAliasDeprecated" server="true" client="true">
     <param name="id" type="int[]" />
     <param name="type" type="ulong[]" />
   </msg>
@@ -142,6 +162,7 @@
     <param name="group" type="Group" />
     <param name="idx" type="int" />
     <param name="faceUp" type="bool" />
+    <param name="isScriptMove" type="bool"/>
   </msg>
   <msg name="MoveCard" client="true">
     <param name="player" type="Player" />
@@ -149,12 +170,14 @@
     <param name="group" type="Group" />
     <param name="idx" type="int" />
     <param name="faceUp" type="bool" />
+    <param name="isScriptMove" type="bool"/>
   </msg>
   <msg name="MoveCardAtReq" server="true">
     <param name="card" type="Card" />
     <param name="x" type="int" />
     <param name="y" type="int" />
     <param name="idx" type="int" />
+    <param name="isScriptMove" type="bool"/>
     <param name="faceUp" type="bool" />
   </msg>
   <msg name="MoveCardAt" client="true">
@@ -164,6 +187,7 @@
     <param name="y" type="int" />
     <param name="idx" type="int" />
     <param name="faceUp" type="bool" />
+    <param name="isScriptMove" type="bool"/>
   </msg>
 
   <msg name="Reveal" server="true" client="true">
@@ -239,24 +263,23 @@
     <param name="rot" type="CardOrientation" />
   </msg>
 
-  <msg name="Shuffle" client="true" server="true">
+  <msg name="ShuffleDeprecated" client="true" server="true">
     <param name="group" type="Group" />
     <param name="card" type="int[]" />
   </msg>
   <msg name="Shuffled" client="true" server="true">
+    <param name="player" type="Player" />
     <param name="group" type="Group" />
     <param name="card" type="int[]" />
     <param name="pos" type="short[]" />
   </msg>
-  <msg name="UnaliasGrp" client="true" server="true">
+  <msg name="UnaliasGrpDeprecated" client="true" server="true">
     <param name="group" type="Group" />
   </msg>
-  <msg name="Unalias" client="true" server="true">
+  <msg name="UnaliasDeprecated" client="true" server="true">
     <param name="card" type="int[]" />
     <param name="type" type="ulong[]" />
   </msg>
-
-  <!-- TODO: only keep SetMarker(Req) and TransferMarker(Req) -->
   <msg name="AddMarkerReq" server="true">
     <param name="card" type="Card" />
     <param name="id" type="Guid" />
@@ -277,19 +300,6 @@
     <param name="count" type="ushort" />
   </msg>
   <msg name="RemoveMarker" client="true">
-    <param name="player" type="Player" />
-    <param name="card" type="Card" />
-    <param name="id" type="Guid" />
-    <param name="name" type="string" />
-    <param name="count" type="ushort" />
-  </msg>
-  <msg name="SetMarkerReq" server="true">
-    <param name="card" type="Card" />
-    <param name="id" type="Guid" />
-    <param name="name" type="string" />
-    <param name="count" type="ushort" />
-  </msg>
-  <msg name="SetMarker" client="true">
     <param name="player" type="Player" />
     <param name="card" type="Card" />
     <param name="id" type="Guid" />
@@ -420,5 +430,64 @@
   <msg name="CancelLimitedReq" server="true"></msg>
   <msg name="CancelLimited" client="true">
     <param name="player" type="Player" />
+  </msg>
+  <msg name="CardSwitchTo" server="true" client="true">
+    <param name="player" type="Player"/>
+    <param name="card" type="Card" />
+    <param name="alternate" type="string" />
+  </msg>
+  <msg name="PlayerSetGlobalVariable" server="true" client="true">
+    <param name="player" type="Player"/>
+    <param name="name" type="string"/>
+    <param name="val" type="string"/>
+  </msg>
+  <msg name="SetGlobalVariable" server="true" client="true">
+    <param name="name" type="string"/>
+    <param name="val" type="string"/>
+  </msg>
+  <msg name="SwitchWithAlternate">
+  </msg>
+  <msg name="Ping" server="true" client="true"></msg>
+  <msg name="IsTableBackgroundFlipped" server="true" client="true">
+    <param name="isFlipped" type="bool"/>
+  </msg>
+  <msg name="PlaySound" client="true" server="true">
+    <param name="player" type="Player"/>
+    <param name="name" type="string"/>
+  </msg>
+  <msg name="Ready" client="true" server="true">
+    <param name="player" type="Player"/>
+  </msg>
+  <msg name="PlayerState" client="true">
+    <param name="player" type="Player"/>
+    <param name="state" type="byte"/>
+  </msg>
+  <msg name="RemoteCall" client="true" server="true">
+    <param name="player" type="Player"/>
+    <param name="function" type="string"/>
+    <param name="args" type="string"/>
+  </msg>
+  <msg name="GameStateReq" client="true" server="true">
+    <param name="player" type="Player"/>
+  </msg>
+  <msg name="GameState" client="true" server="true">
+    <param name="toPlayer" type="Player"/>
+    <param name="state" type="string"/>
+  </msg>
+  <msg name="DeleteCard" client="true" server="true">
+    <param name="card" type="Card"/>
+    <param name="player" type="Player"/>
+  </msg>
+  <msg name="PlayerDisconnect" client="true">
+    <param name="player" type="Player"/>
+  </msg>
+  <msg name="AddPacksReq" server="true">
+    <param name="packs" type="Guid[]" />
+    <param name="selfOnly" type="bool" />
+  </msg>
+  <msg name="AddPacks" client="true">
+    <param name="player" type="Player"/>
+    <param name="packs" type="Guid[]" />
+    <param name="selfOnly" type="bool" />
   </msg>
 </protocol>

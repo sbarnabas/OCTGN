@@ -6,8 +6,14 @@ using System.Windows.Input;
 
 namespace Octgn.Play.Gui
 {
+    using System.Reflection;
+
+    using log4net;
+
     public partial class MarkerControl
     {
+        internal static ILog Log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+
         public MarkerControl()
         {
             InitializeComponent();
@@ -15,7 +21,7 @@ namespace Octgn.Play.Gui
             if (DesignerProperties.GetIsInDesignMode(this)) return;
 
             AddHandler(TableControl.TableKeyEvent, new EventHandler<TableKeyEventArgs>(TableKeyDown));
-            int markerSize = Program.Game.Definition.MarkerSize;
+            int markerSize = Program.GameEngine.Definition.MarkerSize;
             img1.Height = markerSize;
             textBorder.Margin = new Thickness(markerSize*0.2, markerSize*0.04, 0, markerSize*0.04);
             text.Margin = new Thickness(markerSize*0.3, 0, markerSize*0.3, 0);
@@ -127,14 +133,24 @@ namespace Octgn.Play.Gui
 
         private void DragCompleted()
         {
-            ((AdornerLayer) _adorner.Parent).Remove(_adorner);
-            _adorner = null;
-            var marker = (Marker) DataContext;
-            ushort count = _takeAll ? marker.Count : (ushort) 1;
-            var e = new MarkerEventArgs(this, marker, count);
-            Mouse.DirectlyOver.RaiseEvent(e);
-            if (Keyboard.IsKeyUp(Key.LeftAlt) && !e.Handled)
-                marker.Count -= count;
+            // Hack, one of these ends up null and I'm not sure why
+            try
+            {
+                if (_adorner == null || _adorner.Parent == null) return;
+                ((AdornerLayer)_adorner.Parent).Remove(_adorner);
+                _adorner = null;
+                var marker = (Marker)DataContext;
+                ushort count = _takeAll ? marker.Count : (ushort)1;
+                var e = new MarkerEventArgs(this, marker, count);
+                Mouse.DirectlyOver.RaiseEvent(e);
+                if (Keyboard.IsKeyUp(Key.LeftAlt) && !e.Handled)
+                    marker.Count -= count;
+
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("DragCompleted",ex);
+            }
         }
 
         #endregion

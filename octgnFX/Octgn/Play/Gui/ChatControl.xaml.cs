@@ -11,8 +11,62 @@ using Octgn.Data;
 
 namespace Octgn.Play.Gui
 {
-    partial class ChatControl
+    using System.Reflection;
+    using System.Windows.Controls;
+    using System.Windows.Media.Animation;
+    using System.Windows.Media.Media3D;
+    using System.Windows.Threading;
+
+    using Microsoft.Win32;
+
+    using Octgn.Annotations;
+    using Octgn.Core.DataExtensionMethods;
+
+    using log4net;
+
+    partial class ChatControl : INotifyPropertyChanged
     {
+        internal static ILog Log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+        private bool showInput = true;
+
+        private bool hideErrors;
+
+        public bool IgnoreMute { get; set; }
+
+        public bool ShowInput
+        {
+            get
+            {
+                return this.showInput;
+            }
+            set
+            {
+                if (value.Equals(this.showInput))
+                {
+                    return;
+                }
+                this.showInput = value;
+                this.OnPropertyChanged("ShowInput");
+            }
+        }
+
+        public bool HideErrors
+        {
+            get
+            {
+                return this.hideErrors;
+            }
+            set
+            {
+                if (value.Equals(this.hideErrors))
+                {
+                    return;
+                }
+                this.hideErrors = value;
+                this.OnPropertyChanged("HideErrors");
+            }
+        }
+
         public ChatControl()
         {
             InitializeComponent();
@@ -71,12 +125,52 @@ namespace Octgn.Play.Gui
         {
             input.Focus();
         }
+
+        public void Save()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(new Action(this.Save));
+                return;
+            }
+            try
+            {
+                var sfd = new SaveFileDialog { Filter = "Octgn Game Log (*.txt) | *.txt" };
+                if (sfd.ShowDialog().GetValueOrDefault(false))
+                {
+                    var tr = new TextRange(output.Document.ContentStart, output.Document.ContentEnd);
+                    using (var stream = sfd.OpenFile())
+                    {
+                        tr.Save(stream, DataFormats.Text);
+                        stream.Flush();
+                    }
+                }
+
+            }
+            catch (Exception e)
+            {
+                Log.Warn("Save log error",e);
+            }
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        [NotifyPropertyChangedInvocator]
+        protected virtual void OnPropertyChanged(string propertyName)
+        {
+            var handler = PropertyChanged;
+            if (handler != null)
+            {
+                handler(this, new PropertyChangedEventArgs(propertyName));
+            }
+        }
     }
 
     internal sealed class ChatTraceListener : TraceListener
     {
         private static readonly Brush TurnBrush;
         private readonly ChatControl _ctrl;
+        private readonly Dispatcher Dispatcher;
 
         static ChatTraceListener()
         {
@@ -88,6 +182,7 @@ namespace Octgn.Play.Gui
         public ChatTraceListener(string name, ChatControl ctrl)
             : base(name)
         {
+            Dispatcher = ctrl.Dispatcher;
             _ctrl = ctrl;
         }
 
@@ -104,13 +199,25 @@ namespace Octgn.Play.Gui
         public override void TraceEvent(TraceEventCache eventCache, string source, TraceEventType eventType, int id,
                                         string format, params object[] args)
         {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(()=>this.TraceEvent(eventCache, source, eventType, id, format, args)));
+                return;
+            }
             Program.LastChatTrace = null;
 
-            if (eventType > TraceEventType.Warning &&
-                IsMuted() &&
-                ((id & EventIds.Explicit) == 0))
-                return;
-
+            if (!_ctrl.IgnoreMute)
+            {
+                if (eventType > TraceEventType.Warning && IsMuted() && ((id & EventIds.Explicit) == 0)) return;
+            }
+            if (_ctrl.HideErrors)
+            {
+                if (eventType == TraceEventType.Critical || eventType == TraceEventType.Error
+                    || eventType == TraceEventType.Warning)
+                {
+                    return;
+                }
+            }
             if (id == EventIds.Turn)
             {
                 var p = new Paragraph
@@ -134,20 +241,24 @@ namespace Octgn.Play.Gui
                 _ctrl.output.ScrollToEnd();
             }
             else
-                InsertLine(FormatInline(MergeArgs(format, args), eventType, id, args));
+                InsertLine(FormatInline(_ctrl,MergeArgs(format, args), eventType, id, args));
         }
 
         public override void TraceEvent(TraceEventCache eventCache, string source, TraceEventType eventType, int id,
                                         string message)
         {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => this.TraceEvent(eventCache, source, eventType, id, message)));
+                return;
+            }
             Program.LastChatTrace = null;
 
-            if (eventType > TraceEventType.Warning &&
-                IsMuted() &&
-                ((id & EventIds.Explicit) == 0))
-                return;
-
-            InsertLine(FormatMsg(message, eventType, id));
+            if (!_ctrl.IgnoreMute)
+            {
+                if (eventType > TraceEventType.Warning && IsMuted() && ((id & EventIds.Explicit) == 0)) return;
+            }
+            InsertLine(FormatMsg(_ctrl,message, eventType, id));
         }
 
         private static bool IsMuted()
@@ -157,14 +268,37 @@ namespace Octgn.Play.Gui
 
         private void InsertLine(Inline message)
         {
-            var p = (Paragraph) _ctrl.output.Document.Blocks.LastBlock;
-            if (p.Inlines.Count > 0) p.Inlines.Add(new LineBreak());
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => this.InsertLine(message)));
+                return;
+            }
+            //TextIndent="-60" Margin="60,20,0,0"
+            var p = new Paragraph();
+            p.TextIndent = -15;
+            p.Margin = new Thickness(15, 0, 0, 0);
             p.Inlines.Add(message);
             Program.LastChatTrace = message;
+            _ctrl.output.Document.Blocks.Add(p);
             _ctrl.output.ScrollToEnd();
+
+            //var p = (Paragraph)this._ctrl.output.Document.Blocks.LastBlock;
+            //if (p.Inlines.Count > 0) p.Inlines.Add(new LineBreak());
+            //p.Inlines.Add(message);
+            //Program.LastChatTrace = message;
+            //_ctrl.output.ScrollToEnd();
         }
 
-        private static Inline FormatInline(Inline inline, TraceEventType eventType, int id, Object[] args = null)
+        /// <summary>
+        /// Format an inline. MUST BE CALLED ON THE UI THREAD
+        /// </summary>
+        /// <param name="control"></param>
+        /// <param name="inline"></param>
+        /// <param name="eventType"></param>
+        /// <param name="id"></param>
+        /// <param name="args"></param>
+        /// <returns></returns>
+        private static Inline FormatInline(ChatControl control, Inline inline, TraceEventType eventType, int id, Object[] args = null)
         {
             switch (eventType)
             {
@@ -179,7 +313,7 @@ namespace Octgn.Play.Gui
                     if (args == null || args.GetUpperBound(0) == -1)
                     {
                         if ((id & EventIds.OtherPlayer) == 0)
-                            inline.Foreground = Brushes.DarkGray;
+                            inline.Foreground = Brushes.Black;
                     }
                     else
                     {
@@ -191,18 +325,55 @@ namespace Octgn.Play.Gui
                             p = args[i] as Player;
                         }
                         inline.Foreground = p != null ? new SolidColorBrush(p.Color) : Brushes.Red;
+
+                        if (p != null && Player.LocalPlayer.Id != p.Id)
+                        {
+                            var theinline = inline;
+                            theinline.Initialized += (sender, eventArgs) =>
+                                {
+                                    try
+                                    {
+                                        var curcolor = (theinline.Foreground as SolidColorBrush).Color;
+                                        var dbAscending = new ColorAnimation(curcolor, Colors.Crimson, new Duration(TimeSpan.FromMilliseconds(500)))
+                                            { RepeatBehavior = new RepeatBehavior(2), AutoReverse = true };
+                                        var storyboard = new Storyboard();
+                                        Storyboard.SetTarget(dbAscending, theinline);
+                                        Storyboard.SetTargetProperty(dbAscending, new PropertyPath("Foreground.Color"));
+                                        storyboard.Children.Add(dbAscending);
+                                        storyboard.Begin(control);
+                                    }
+                                    catch (Exception)
+                                    {
+                                    }
+                                };
+                        }
                     }
                     break;
             }
             return inline;
         }
 
-        private static Inline FormatMsg(string text, TraceEventType eventType, int id)
+        /// <summary>
+        /// Formate a message. MUST BE CALLED ON THE UI THREAD.
+        /// </summary>
+        /// <param name="control"></param>
+        /// <param name="text"></param>
+        /// <param name="eventType"></param>
+        /// <param name="id"></param>
+        /// <returns></returns>
+        private static Inline FormatMsg(ChatControl control,string text, TraceEventType eventType, int id)
         {
             var result = new Run(text);
-            return FormatInline(result, eventType, id);
+            return FormatInline(control,result, eventType, id);
         }
 
+        /// <summary>
+        /// Merge arguments...MUST BE CALLED ON THE UI THREAD.
+        /// </summary>
+        /// <param name="format"></param>
+        /// <param name="args"></param>
+        /// <param name="startAt"></param>
+        /// <returns></returns>
         private static Inline MergeArgs(string format, IList<object> args, int startAt = 0)
         {
             for (int i = startAt; i < args.Count; i++)
@@ -210,7 +381,7 @@ namespace Octgn.Play.Gui
                 object arg = args[i];
                 string placeholder = "{" + i + "}";
 
-                var cardModel = arg as CardModel;
+                var cardModel = arg as DataNew.Entities.Card;
                 var cardId = arg as CardIdentity;
                 var card = arg as Card;
                 if (card != null && (card.FaceUp || card.MayBeConsideredFaceUp))
@@ -236,9 +407,9 @@ namespace Octgn.Play.Gui
 
     internal class CardModelEventArgs : RoutedEventArgs
     {
-        public readonly CardModel CardModel;
+        public readonly DataNew.Entities.Card CardModel;
 
-        public CardModelEventArgs(CardModel model, RoutedEvent routedEvent, object source)
+        public CardModelEventArgs(DataNew.Entities.Card model, RoutedEvent routedEvent, object source)
             : base(routedEvent, source)
         {
             CardModel = model;
@@ -255,7 +426,7 @@ namespace Octgn.Play.Gui
                                                                                                      >),
                                                                                                  typeof (CardRun));
 
-        private CardModel _card;
+        private DataNew.Entities.Card _card;
 
         public CardRun(CardIdentity id)
             : base(id.ToString())
@@ -265,17 +436,17 @@ namespace Octgn.Play.Gui
                 id.Revealed += new CardIdentityNamer {Target = this}.Rename;
         }
 
-        public CardRun(CardModel model)
-            : base(model.Name)
+        public CardRun(DataNew.Entities.Card model)
+            : base(model.PropertyName())
         {
             _card = model;
         }
 
-        public void SetCardModel(CardModel model)
+        public void SetCardModel(DataNew.Entities.Card model)
         {
             Debug.Assert(_card == null, "Cannot set the CardModel of a CardRun if it is already defined");
             _card = model;
-            Text = model.Name;
+            Text = model.PropertyName();
         }
 
         protected override void OnMouseEnter(MouseEventArgs e)

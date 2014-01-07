@@ -7,16 +7,27 @@ using System.Linq;
 using System.Net;
 using System.Security;
 using System.Windows.Media;
-using Octgn.Data;
-using Octgn.Definitions;
+
 using Octgn.Networking;
 using Octgn.Play;
 using Octgn.Play.Actions;
 using Octgn.Play.Gui;
 using Octgn.Scripting.Controls;
+using Octgn.Utils;
 
 namespace Octgn.Scripting
 {
+    using System.Linq.Expressions;
+    using System.Text;
+    using System.Threading;
+    using System.Windows.Media.Imaging;
+    using System.Windows.Threading;
+
+    using Octgn.Core;
+    using Octgn.Core.DataExtensionMethods;
+    using Octgn.Core.Util;
+    using Octgn.Extentions;
+
     [SecuritySafeCritical]
     public class ScriptApi : MarshalByRefObject
     {
@@ -60,9 +71,15 @@ namespace Octgn.Scripting
 
         public bool IsActivePlayer(int id)
         {
-            if (Program.Game.TurnPlayer == null)
+            if (Program.GameEngine.TurnPlayer == null)
                 return false;
-            return (Program.Game.TurnPlayer.Id == id);
+            return (Program.GameEngine.TurnPlayer.Id == id);
+        }
+
+        public void setActivePlayer(int id)
+        {
+            if (Program.GameEngine.TurnPlayer == null || Program.GameEngine.TurnPlayer == Player.LocalPlayer)
+                Program.Client.Rpc.NextTurn(Player.Find((byte) id));
         }
 
         public List<KeyValuePair<int, string>> PlayerCounters(int id)
@@ -143,21 +160,39 @@ namespace Octgn.Scripting
         {
             var pile = (Pile) Group.Find(id);
 
-            var isAsync = _engine.Invoke<bool>(() => pile.Shuffle());
-            if (!isAsync) return;
+            _engine.Invoke(() => pile.Shuffle());
 
-            pile.Shuffled += new ShuffleAsync {engine = _engine}.Continuation;
-            _engine.Suspend();
         }
 
-        private class ShuffleAsync
+        public int GroupController(int id)
         {
-            public Engine engine;
+            return Group.Find(id).Controller.Id;
+        }
 
-            public void Continuation(object sender, EventArgs e)
+        public bool IsTableBackgroundFlipped()
+        {
+            return Program.GameEngine.IsTableBackgroundFlipped;
+        }
+
+        public void SetTableBackgroundFlipped(bool isFlipped)
+        {
+            Program.Client.Rpc.IsTableBackgroundFlipped(isFlipped);
+        }
+
+        public void GroupSetController(int id, int player)
+        {
+            var g = Group.Find(id);
+            var p = Player.Find((byte)player);
+
+            if (p == Player.LocalPlayer)
             {
-                ((Group) sender).Shuffled -= Continuation;
-                engine.Resume();
+                if (g.Controller == Player.LocalPlayer) return;
+                _engine.Invoke(() => g.TakeControl());
+            }
+            else
+            {
+                if (g.Controller != Player.LocalPlayer) return;
+                _engine.Invoke(() => g.PassControlTo(p));
             }
         }
 
@@ -167,41 +202,34 @@ namespace Octgn.Scripting
 
         public string[] CardProperties()
         {
-            return Program.Game.Definition.CardDefinition.Properties.Keys.ToArray();
+            return Program.GameEngine.Definition.CustomProperties.Select(x=>x.Name).ToArray();
         }
 
         public Tuple<int, int> CardSize()
         {
-            CardDef def = Program.Game.Definition.CardDefinition;
-            return Tuple.Create(def.Width, def.Height);
+            return Tuple.Create(Program.GameEngine.Definition.CardWidth, Program.GameEngine.Definition.CardHeight);
         }
 
-        public bool IsAlternate(int id)
+        public void CardSwitchTo(int id, string alternate)
         {
-            return Card.Find(id).isAlternate();
-        }
-        public bool IsAlternateImage(int id)
-        {
-            return Card.Find(id).IsAlternateImage;
+            var c = Card.Find(id);
+            if (c == null) return;
+            _engine.Invoke(()=>c.SwitchTo(Player.LocalPlayer,alternate));
+            
         }
 
-        /// <summary>
-        /// takes a card with id, and swaps it with the predefined "alternate" version of the card
-        /// alternate may be considered the "back" of the card, or another card entirely - up to Game Definer.
-        /// id and identity will remain the same, all other data should change.
-        /// </summary>
-        /// <param name="id"></param>
-        public void SwitchWithAlternate(int id)
+        public string[] CardAlternates(int id)
         {
-            Card c = Card.Find(id);
-            _engine.Invoke(() => Program.Client.Rpc.SwitchWithAlternate(c) );
-                //I'm relying on this to send the message to other clients. TODO: Need to fully test
+            var c = Card.Find(id);
+            if(c == null)return new string[0];
+            return c.Alternates();
         }
-        public void SwitchImage(int id)
+
+        public string CardAlternate(int id)
         {
-            Card c = Card.Find(id);
-            //c.IsAlternateImage = (c.IsAlternateImage != true);
-            _engine.Invoke(() => { c.IsAlternateImage = (c.IsAlternateImage != true); });
+            var c = Card.Find(id);
+            if (c == null) return "";
+            return c.Alternate();
         }
 
         public string CardName(int id)
@@ -220,8 +248,29 @@ namespace Octgn.Scripting
         public object CardProperty(int id, string property)
         {
             Card c = Card.Find(id);
+            //the ToLower() and ToLower() lambdas are for case insensitive properties requested by game developers.
+            property = property.ToLowerInvariant();
             if ((!c.FaceUp && !c.PeekingPlayers.Contains(Player.LocalPlayer)) || c.Type.Model == null) return "?";
-            return c.Type.Model.Properties[property];
+            if (!c.Type.Model.PropertySet().Keys.Select(x => x.Name.ToLower()).Contains(property)) { return IronPython.Modules.Builtin.None; }
+            object ret = c.Type.Model.PropertySet().FirstOrDefault(x => x.Key.Name.ToLower().Equals(property)).Value;
+            return (ret);
+        }
+
+        public object CardAlternateProperty(int id, string alt, string property)
+        {
+            Card c = Card.Find(id);
+            //the ToLower() and ToLower() lambdas are for case insensitive properties requested by game developers.
+            property = property.ToLowerInvariant();
+            alt = alt.ToLowerInvariant();
+            if ((!c.FaceUp && !c.PeekingPlayers.Contains(Player.LocalPlayer)) || c.Type.Model == null) return "?";
+            if (!c.Type.Model.PropertySet().Keys.Select(x => x.Name.ToLower()).Contains(property)){return IronPython.Modules.Builtin.None;}
+            var ps =
+                c.Type.Model.Properties
+                .Select(x=>new {Key=x.Key,Value=x.Value})
+                .FirstOrDefault(x => x.Key.Equals(alt, StringComparison.InvariantCultureIgnoreCase));
+            if (ps == null) return IronPython.Modules.Builtin.None;
+            object ret = ps.Value.Properties.FirstOrDefault(x => x.Key.Name.ToLower().Equals(property)).Value;
+            return (ret);
         }
 
         public int CardOwner(int id)
@@ -232,6 +281,24 @@ namespace Octgn.Scripting
         public int CardController(int id)
         {
             return Card.Find(id).Controller.Id;
+        }
+
+        public void SetController(int id, int player)
+        {
+            Card c = Card.Find(id);
+            Player p = Player.Find((byte) player);
+            Player controller = c.Controller;
+
+            if (p == Player.LocalPlayer)
+            {
+                if (c.Controller == Player.LocalPlayer) return;
+                _engine.Invoke(() => c.TakeControl());
+            }
+            else
+            {
+                if (c.Controller != Player.LocalPlayer) return;
+                _engine.Invoke(() => c.PassControlTo(p));
+            }
         }
 
         public int CardGroup(int id)
@@ -290,8 +357,8 @@ namespace Octgn.Scripting
             Group group = Group.Find(groupId);
             _engine.Invoke(() =>
                                {
-                                   if (position == null) card.MoveTo(group, true);
-                                   else card.MoveTo(group, true, position.Value);
+                                   if (position == null) card.MoveTo(group, true,true);
+                                   else card.MoveTo(group, true, position.Value,true);
                                });
         }
 
@@ -299,7 +366,7 @@ namespace Octgn.Scripting
         {
             Card c = Card.Find(cardId);
             bool faceUp = !forceFaceDown && (!(c.Group is Table) || c.FaceUp);
-            _engine.Invoke(() => c.MoveToTable((int) x, (int) y, faceUp, Program.Game.Table.Count));
+            _engine.Invoke(() => c.MoveToTable((int) x, (int) y, faceUp, Program.GameEngine.Table.Count,true));
         }
 
         public void CardSelect(int id)
@@ -326,14 +393,19 @@ namespace Octgn.Scripting
         //ralig98
         public void CardSetIndex(int CardId, int idx, bool TableOnly = false)
         {
+            if (idx < 0)
+            {
+                Program.TraceWarning("Cannot setIndex({0}), number is less than 0",idx);
+                return;
+            }
             Card c = Card.Find(CardId);
             if (TableOnly)
             {
                 if (c.Group is Table)
-                    _engine.Invoke(() => c.MoveToTable((int) c.X, (int) c.Y, c.FaceUp, idx));
+                    _engine.Invoke(() => c.MoveToTable((int) c.X, (int) c.Y, c.FaceUp, idx,true));
             }
             else
-                _engine.Invoke(() => c.MoveToTable((int) c.X, (int) c.Y, c.FaceUp, idx));
+                _engine.Invoke(() => c.MoveToTable((int) c.X, (int) c.Y, c.FaceUp, idx,true));
         }
 
         public void CardTarget(int id, bool active)
@@ -344,6 +416,28 @@ namespace Octgn.Scripting
                                    if (active) c.Target();
                                    else c.Untarget();
                                });
+        }
+
+        public void CardPeek(int id)
+        {
+            Card c = Card.Find(id);
+            _engine.Invoke(() =>
+            {
+                c.Peek();
+            });
+        }
+
+
+
+        public void CardTargetArrow(int id, int targetId, bool active)
+        {
+            Card c = Card.Find(id);
+            Card target = Card.Find(targetId);
+            _engine.Invoke(() =>
+            {
+                if (active) c.Target(target);
+                else c.Untarget();
+            });
         }
 
         public int CardTargeted(int id)
@@ -369,12 +463,37 @@ namespace Octgn.Scripting
             if (count < 0) count = 0;
             Card card = Card.Find(cardId);
             Guid guid = Guid.Parse(markerId);
-            //Marker marker = card.FindMarker(guid, markerName);
+            Marker marker = card.FindMarker(guid, markerName);
+
             _engine.Invoke(() =>
                                {
-                                   card.SetMarker(Player.LocalPlayer, guid, markerName, count);
-                                   Program.Client.Rpc.SetMarkerReq(card, guid, markerName, (ushort) count);
+                                   if (marker == null)
+                                   {
+                                       card.SetMarker(Player.LocalPlayer, guid, markerName, count);
+                                       Program.Client.Rpc.AddMarkerReq(card, guid, markerName, (ushort)count);
+                                   }
+                                   else marker.Count = (ushort)count;
                                });
+        }
+
+        // TODO: Replace this hack with an actual delete function.
+        public void CardDelete(int cardId)
+        {
+            Card c = Card.Find(cardId);
+            if (c == null)
+                return;
+            if (c.Controller != Player.LocalPlayer)
+            {
+                Program.TraceWarning("Cannot delete({0}), because you do not control it. ", cardId);
+                return;
+            }
+            _engine.Invoke(() =>
+            {
+                if (c == null)
+                    return;
+                    Program.Client.Rpc.DeleteCard(c, Player.LocalPlayer);
+                    c.Group.Remove(c);
+                });
         }
 
         #endregion Cards API
@@ -389,7 +508,11 @@ namespace Octgn.Scripting
 
         public void Notify(string message)
         {
-            _engine.Invoke(() => Program.Client.Rpc.PrintReq(message));
+            _engine.Invoke(() =>
+                            {
+                                Program.Client.Rpc.PrintReq(message);
+                                Program.Print(Player.LocalPlayer, message);
+                            });
         }
 
         public void Whisper(string message)
@@ -414,13 +537,22 @@ namespace Octgn.Scripting
                                             });
         }
 
+        public int? AskChoice(string question, List<string> choices, List<string> colors, List<string> buttons)
+        {
+            return _engine.Invoke<int?>(() =>
+            {
+                var dlg = new ChoiceDlg("Choose One", question, choices, colors, buttons);
+                int? result = dlg.GetChoice();
+                return dlg.DialogResult.GetValueOrDefault() ? result: 0;
+            });
+        }
+
         public Tuple<string, string, int> AskMarker()
         {
             return _engine.Invoke<Tuple<string, string, int>>(() =>
                                                                   {
                                                                       //fix MAINWINDOW bug
-                                                                      var dlg = new MarkerDlg
-                                                                                    {Owner = Program.PlayWindow};
+                                                                      var dlg = new MarkerDlg { Owner = WindowManager.PlayWindow };
                                                                       if (!dlg.ShowDialog().GetValueOrDefault())
                                                                           return null;
                                                                       return Tuple.Create(dlg.MarkerModel.Name,
@@ -429,19 +561,31 @@ namespace Octgn.Scripting
                                                                   });
         }
 
-        public Tuple<string, int> AskCard(string restriction)
+        //public Tuple<string, int> AskCard(string restriction)
+        //{
+        //    return _engine.Invoke<Tuple<string, int>>(() =>
+        //                                                  {
+        //                                                      //fix MAINWINDOW bug
+        //                                                      var dlg = new CardDlg(restriction) { Owner = WindowManager.PlayWindow };
+        //                                                      if (!dlg.ShowDialog().GetValueOrDefault()) return null;
+        //                                                      return Tuple.Create(dlg.SelectedCard.Id.ToString(),
+        //                                                                          dlg.Quantity);
+        //                                                  });
+        //}
+
+        public Tuple<string, int> AskCard(Dictionary<string,string> properties, string op )
         {
+            //this.AskCard(x => x.Where(y => y.Name = "a"));
+            //default(DataNew.Entities.ICard).Properties.Where(x => x.Key.Name == "Rarity" && x.Value == "Token");
             return _engine.Invoke<Tuple<string, int>>(() =>
                                                           {
                                                               //fix MAINWINDOW bug
-                                                              var dlg = new CardDlg(restriction)
-                                                                            {Owner = Program.PlayWindow};
+                                                              var dlg = new CardDlg(properties,op) { Owner = WindowManager.PlayWindow };
                                                               if (!dlg.ShowDialog().GetValueOrDefault()) return null;
                                                               return Tuple.Create(dlg.SelectedCard.Id.ToString(),
                                                                                   dlg.Quantity);
                                                           });
         }
-
         #endregion Messages API
 
         #region Random
@@ -477,7 +621,77 @@ namespace Octgn.Scripting
 
         #region Special APIs
 
-        public List<int> CreateOnTable(string modelId, int x, int y, bool persist, int quantity)
+        public string GetGameName()
+        {
+            return Program.CurrentOnlineGameName;
+        }
+
+        public int TurnNumber()
+        {
+            return (int)Program.GameEngine.TurnNumber;
+        }
+
+        public List<int> Create(string modelId, int groupId, int quantity)
+        {
+            var ret = new List<int>();
+
+            Guid modelGuid;
+            if (!Guid.TryParse(modelId, out modelGuid)) return ret;
+
+            var model = Program.GameEngine.Definition.GetCardById(modelGuid);
+            if (model == null) return ret;
+
+            var group = Group.Find(groupId);
+            if (group == null) return ret;
+
+            _engine.Invoke(
+                () =>
+                    {
+                        var gt = new GameEngine.GrpTmp(group, group.Visibility, group.Viewers.ToList());
+                        group.SetVisibility(false, false);
+
+
+                        var ids = new int[quantity];
+                        var keys = new ulong[quantity];
+                        for (int i = 0; i < quantity; ++i)
+                        {
+                            var card = model.ToPlayCard(Player.LocalPlayer);
+                            //ulong key = (ulong)Crypto.PositiveRandom() << 32 | model.Id.Condense();
+                            //int id = Program.GameEngine.GenerateCardId();
+                            ids[i] = card.Id;
+                            keys[i] = card.GetEncryptedKey();
+                            ret.Add(card.Id);
+                            group.AddAt(card, group.Count);
+                        }
+
+                        string pictureUri = model.GetPicture();
+                        Dispatcher.CurrentDispatcher.BeginInvoke(
+                            new Func<string, BitmapImage>(ImageUtils.CreateFrozenBitmap),
+                            DispatcherPriority.ApplicationIdle, pictureUri);
+
+                        Program.Client.Rpc.CreateCard(ids, keys, group);
+
+                        switch (gt.Visibility)
+                        {
+                            case DataNew.Entities.GroupVisibility.Everybody:
+                                group.SetVisibility(true, false);
+                                break;
+                            case DataNew.Entities.GroupVisibility.Nobody:
+                                group.SetVisibility(false, false);
+                                break;
+                            default:
+                                foreach (Player p in gt.Viewers)
+                                {
+                                    group.AddViewer(p, false);
+                                }
+                                break;
+                        }
+                    });
+            return ret;
+            // Comment for a test.
+        }
+
+        public List<int> CreateOnTable(string modelId, int x, int y, bool persist, int quantity, bool faceDown)
         {
             var result = new List<int>();
 
@@ -487,7 +701,7 @@ namespace Octgn.Scripting
 
             _engine.Invoke(() =>
                                {
-                                   CardModel model = Database.GetCardById(modelGuid);
+                                   DataNew.Entities.Card model = Program.GameEngine.Definition.GetCardById(modelGuid);
                                    if (model == null)
                                    {
                                    }
@@ -498,23 +712,22 @@ namespace Octgn.Scripting
                                        var models = new Guid[quantity];
                                        int[] xs = new int[quantity], ys = new int[quantity];
 
-                                       CardDef def = Program.Game.Definition.CardDefinition;
 
-                                       if (Player.LocalPlayer.InvertedTable)
-                                       {
-                                           x -= def.Width;
-                                           y -= def.Height;
-                                       }
-                                       var offset = (int) (Math.Min(def.Width, def.Height)*0.2);
-                                       if (Program.GameSettings.UseTwoSidedTable && TableControl.IsInInvertedZone(y))
-                                           offset = -offset;
+                                    //   if (Player.LocalPlayer.InvertedTable)
+                                    //   {
+                                    //       x -= Program.GameEngine.Definition.CardWidth;
+                                    //       y -= Program.GameEngine.Definition.CardHeight;
+                                    //   }
+                                    //   var offset = (int)(Math.Min(Program.GameEngine.Definition.CardWidth, Program.GameEngine.Definition.CardHeight) * 0.2);
+                                    //   if (Program.GameSettings.UseTwoSidedTable && TableControl.IsInInvertedZone(y))
+                                    //       offset = -offset;
 
                                        for (int i = 0; i < quantity; ++i)
                                        {
                                            ulong key = ((ulong) Crypto.PositiveRandom()) << 32 | model.Id.Condense();
-                                           int id = Program.Game.GenerateCardId();
+                                           int id = model.GenerateCardId();
 
-                                           new CreateCard(Player.LocalPlayer, id, key, true, model, x, y, !persist).Do();
+                                           new CreateCard(Player.LocalPlayer, id, key, faceDown != true, model, x, y, !persist).Do();
 
                                            ids[i] = id;
                                            keys[i] = key;
@@ -523,11 +736,14 @@ namespace Octgn.Scripting
                                            ys[i] = y;
                                            result.Add(id);
 
-                                           x += offset;
-                                           y += offset;
+                                    //       x += offset;
+                                    //       y += offset;
                                        }
-
-                                       Program.Client.Rpc.CreateCardAt(ids, keys, models, xs, ys, true, persist);
+                                       string pictureUri = model.GetPicture();
+                                       Dispatcher.CurrentDispatcher.BeginInvoke(
+                                           new Func<string, BitmapImage>(ImageUtils.CreateFrozenBitmap),
+                                           DispatcherPriority.ApplicationIdle, pictureUri);
+                                       Program.Client.Rpc.CreateCardAt(ids, keys, models, xs, ys, faceDown != true, persist);
                                    }
                                });
 
@@ -539,9 +755,15 @@ namespace Octgn.Scripting
             return Program.GameSettings.UseTwoSidedTable;
         }
 
-        public Tuple<String, int> Web_Read(string url)
+        //status code initial value set to -1
+        //You should never get that value.
+        //It should be 200 for succes
+        //204 for succes but empty response
+        //any other return code is an error
+        //408 is a timeout error.
+        public Tuple<String, int> Web_Read(string url, int timeout)
         {
-            int statusCode = 200;
+            int statusCode = -1;
             string result = "";
             StreamReader reader = null;
 
@@ -552,8 +774,8 @@ namespace Octgn.Scripting
                 permission.AddPermission(NetworkAccess.Connect, url);
                 permission.Assert();
 
-
                 WebRequest request = WebRequest.Create(url);
+                request.Timeout = (timeout == 0) ? request.Timeout : timeout;
                 WebResponse response = request.GetResponse();
 
                 Stream grs = response.GetResponseStream();
@@ -562,29 +784,29 @@ namespace Octgn.Scripting
                     reader = new StreamReader(grs);
                     result = reader.ReadToEnd();
                 }
+                //if the response is empty it will officially return a 204 status code.
+                //This is according to the http specification.
+                if (result.Length < 1)
+                {
+                    result = "error";
+                    statusCode = 204;
+                }
+                else
+                {
+                    //response code 200: HTTP OK request was made succesfully.
+                    statusCode = 200;
+                }
             }
             catch (WebException ex)
             {
-                //Properly handling http errors here
-                if (ex.Status == WebExceptionStatus.ProtocolError && ex.Response != null)
+                var resp = (HttpWebResponse)ex.Response;
+                if (resp == null) statusCode = 500;
+                else
                 {
-                    var resp = (HttpWebResponse) ex.Response;
-                    switch (resp.StatusCode)
-                    {
-                        case HttpStatusCode.NotFound:
-                            result = "eror";
-                            statusCode = 404;
-                            break;
-                        case HttpStatusCode.Forbidden:
-                            result = "error";
-                            statusCode = 403;
-                            break;
-                        case HttpStatusCode.InternalServerError:
-                            result = "error";
-                            statusCode = 500;
-                            break;
-                    }
+                    //Will parse all .net known http status codes.
+                    int.TryParse(resp.StatusCode.ToString(), out statusCode);
                 }
+                result = "error";
             }
             catch (Exception e)
             {
@@ -603,6 +825,12 @@ namespace Octgn.Scripting
             return Tuple.Create(result, statusCode);
         }
 
+        //see Web_Read(string url, int timeout)
+        public Tuple<String, int> Web_Read(string url)
+        {
+            return (Web_Read(url, 0));
+        }
+
         public bool Open_URL(string url)
         {
             if (url.StartsWith("http://") || url.StartsWith("https://") || url.StartsWith("ftp://"))
@@ -611,7 +839,7 @@ namespace Octgn.Scripting
                 {
                     try
                     {
-                        _engine.Invoke(() => Process.Start(url));
+                        _engine.Invoke(() => Program.LaunchUrl(url));
                         return true;
                     }
                     catch (Exception)
@@ -626,12 +854,40 @@ namespace Octgn.Scripting
 
         public string OCTGN_Version()
         {
-            return OctgnApp.OctgnVersion.ToString();
+            return Const.OctgnVersion.ToString();
         }
 
         public string GameDef_Version()
         {
-            return Program.Game.Definition.Version.ToString();
+            return Program.GameEngine.Definition.Version.ToString();
+        }
+
+        public void SaveSetting<T>(string setName, T val)
+        {
+            this._engine.Invoke(() => Prefs.SetGameSetting(Program.GameEngine.Definition,setName,val));
+        }
+
+        public T GetSetting<T>(string setName, T def)
+        {
+            return this._engine.Invoke<T>(() => Prefs.GetGameSetting(Program.GameEngine.Definition, setName, def));
+        }
+
+        public void SetBoardImage(string source)
+        {
+            if (String.IsNullOrWhiteSpace(source)) return;
+            if (!File.Exists(source))
+            {
+                var workingDirectory = Path.Combine(Prefs.DataDirectory, "GameDatabase", Program.GameEngine.Definition.Id.ToString());
+                if (File.Exists(Path.Combine(workingDirectory, source)))
+                {
+                    source = Path.Combine(workingDirectory, source);
+                }
+                else
+                {
+                    throw new Exception(string.Format("Cannot find file {0} or {1}",source,Path.Combine(workingDirectory,source)));
+                }
+            }
+            Program.GameEngine.BoardImage = source;
         }
 
         #endregion Special APIs
@@ -662,18 +918,106 @@ namespace Octgn.Scripting
         public void SetGlobalVariable(string name, object value)
         {
             string val = String.Format("{0}", value);
-            if (Program.Game.GlobalVariables.ContainsKey(name))
-                _engine.Invoke(() => Program.Game.GlobalVariables[name] = val);
+            if (Program.GameEngine.GlobalVariables.ContainsKey(name))
+                _engine.Invoke(() => Program.GameEngine.GlobalVariables[name] = val);
             else
-                _engine.Invoke(() => Program.Game.GlobalVariables.Add(name, val));
+                _engine.Invoke(() => Program.GameEngine.GlobalVariables.Add(name, val));
             Program.Client.Rpc.SetGlobalVariable(name, val);
         }
 
         public string GetGlobalVariable(string name)
         {
-            return Program.Game.GlobalVariables.ContainsKey(name) ? Program.Game.GlobalVariables[name] : "";
+            return Program.GameEngine.GlobalVariables.ContainsKey(name) ? Program.GameEngine.GlobalVariables[name] : "";
         }
 
         #endregion
+
+        public void Update()
+        {
+            var up = new UpdateAsync(_engine);
+            up.Start();
+        }
+
+        internal class UpdateAsync
+        {
+            private readonly Engine engine;
+
+            public UpdateAsync(Engine engine)
+            {
+                this.engine = engine;
+            }
+
+            public void Start()
+            {
+                this.engine.Invoke(Action);
+                this.engine.Suspend();
+            }
+
+            public void Action()
+            {
+                //Thread.Sleep(30);
+                Program.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(this.Continuation));
+            }
+
+            public void Continuation()
+            {
+                this.engine.Resume();
+            }
+        }
+
+        public void PlaySound(string name)
+        {
+            if (Program.GameEngine.Definition.Sounds.ContainsKey(name.ToLowerInvariant()))
+            {
+                var sound = Program.GameEngine.Definition.Sounds[name.ToLowerInvariant()];
+                Program.Client.Rpc.PlaySound(Player.LocalPlayer, sound.Name.ToLowerInvariant());
+                Sounds.PlayGameSound(sound);
+            }
+        }
+
+        public void RemoteCall(int playerid, string func, string args = "")
+        {
+            //if (args == null) args = new object[0];
+
+            //var argString = Program.GameEngine.ScriptEngine.FormatObject(args);
+
+            //var rargs = args.ToArray();
+            //var sb = new StringBuilder();
+            //for (var i = 0; i < rargs.Length; i++)
+            //{
+            //    var isLast = i == rargs.Length - 1;
+            //    var a = rargs[i];
+            //    if (a is Array)
+            //    {
+            //        var arr = a as Array;
+            //        sb.Append("[");
+            //        var argStrings = new List<string>();
+            //        foreach (var o in arr)
+            //        {
+            //            argStrings.Add(Program.GameEngine.ScriptEngine.FormatObject(o));
+            //        }
+            //        sb.Append(string.Join(",", argStrings));
+            //        sb.Append("]");
+            //    }
+            //    else
+            //        sb.Append(Program.GameEngine.ScriptEngine.FormatObject(a));
+
+            //    if (!isLast) sb.Append(", ");
+            //}
+
+            var player = Player.Find((byte)playerid);
+            using (new Mute(_engine.CurrentJob.muted))
+                Program.Client.Rpc.RemoteCall(player, func, args);
+        }
+
+        public void SwitchSides()
+        {
+            _engine.Invoke(()=>Player.LocalPlayer.InvertedTable = Player.LocalPlayer.InvertedTable == false);
+        }
+
+        public void ForceDisconnect()
+        {
+            Program.Client.SeverConnectionAtTheKnee();
+        }
     }
 }

@@ -1,46 +1,53 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
-using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Threading;
+
 using Octgn.Data;
-using Octgn.DeckBuilder;
-using Octgn.Launcher;
 using Octgn.Networking;
 using Octgn.Play;
-using Skylabs.Lobby;
-using Client = Octgn.Networking.Client;
-using RE = System.Text.RegularExpressions;
+using Octgn.Utils;
 
 namespace Octgn
 {
+    using System.Collections.Concurrent;
+    using System.Reflection;
+    using System.Windows.Interop;
+    using System.Windows.Media;
+
+    using Microsoft.Win32;
+
+    using Octgn.Core;
+    using Octgn.Windows;
+
+    using log4net;
+    using Octgn.Controls;
+
     public static class Program
     {
-        public static DWindow DebugWindow;
-        public static Main ClientWindow;
-        public static LauncherWindow LauncherWindow;
-        public static DeckBuilderWindow DeckEditor;
-        public static PlayWindow PlayWindow;
-        public static List<ChatWindow> ChatWindows;
+        internal static ILog Log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
-        public static Game Game;
-        public static Skylabs.Lobby.Client LClient;
+        public static GameEngine GameEngine;
+
+        public static string CurrentOnlineGameName = "";
+        public static Skylabs.Lobby.Client LobbyClient;
         public static GameSettings GameSettings = new GameSettings();
-        public static GamesRepository GamesRepository;
-        internal static Client Client;
+        internal static ClientSocket Client;
+        public static event Action OnOptionsChanged;
+
 
         internal static bool IsGameRunning;
-        internal static readonly string BasePath;
-        internal static readonly string GamesPath;
 
-        internal static ulong PrivateKey = ((ulong) Crypto.PositiveRandom()) << 32 | Crypto.PositiveRandom();
+        internal static bool InPreGame;
 
+#pragma warning disable 67
         internal static event EventHandler<ServerErrorEventArgs> ServerError;
+#pragma warning restore 67
 
         internal static bool IsHost { get; set; }
 
@@ -51,147 +58,183 @@ namespace Octgn
         internal static readonly CacheTraceListener DebugListener = new CacheTraceListener();
         internal static Inline LastChatTrace;
 
-#if(DEBUG)
-        private static Process _lobbyServerProcess;
-#else
-
-#endif
-        private static bool _locationUpdating;
-
-#if(TestServer)
-        public static TestServerSettings LobbySettings = TestServerSettings.Default;
-#else
-    #if(DEBUG)
-            public static DEBUGLobbySettings LobbySettings = DEBUGLobbySettings.Default;
-    #else
-            public static lobbysettings LobbySettings = lobbysettings.Default;
-    #endif
-#endif
+        private static readonly SSLValidationHelper SSLHelper = new SSLValidationHelper();
 
         static Program()
         {
-            LClient = new Skylabs.Lobby.Client();
-            Debug.Listeners.Add(DebugListener);
-            DebugTrace.Listeners.Add(DebugListener);
-            Trace.Listeners.Add(DebugListener);
-            BasePath = Path.GetDirectoryName(typeof (Program).Assembly.Location) + '\\';
-            GamesPath = BasePath + @"Games\";
-            StartLobbyServer();
-            //var e = new Exception();
-            //string s = e.Message.Substring(0);
-            LauncherWindow = new LauncherWindow();
-            Application.Current.MainWindow = LauncherWindow;
-            LClient.Chatting.OnCreateRoom += new Chat.dCreateChatRoom(Chatting_OnCreateRoom);
-        }
-
-        static void Chatting_OnCreateRoom(object sender, NewChatRoom room)
-        {
-            if (ChatWindows.All(x => x.Room.RID != room.RID))
-            {
-                if(ClientWindow != null) ClientWindow.Dispatcher.Invoke(new Action(() => ChatWindows.Add(new ChatWindow(room))));
-                else if(LauncherWindow != null) LauncherWindow.Dispatcher.Invoke(new Action(() => ChatWindows.Add(new ChatWindow(room))));
-            }
-        }
-
-        public static void StartLobbyServer()
-        {
-#if(titties)
-            _lobbyServerProcess = new Process
-                                      {
-                                          StartInfo =
-                                              {FileName = Directory.GetCurrentDirectory() + "/Skylabs.LobbyServer.exe"}
-                                      };
+            Log.Info("Starting OCTGN");
+            Octgn.Site.Api.ApiClient.Site = new Uri(AppConfig.WebsitePath);
             try
             {
-                _lobbyServerProcess.Start();
+                Log.Debug("Setting rendering mode.");
+                RenderOptions.ProcessRenderMode = Prefs.UseHardwareRendering ? RenderMode.Default : RenderMode.SoftwareOnly;
+            }
+            catch (Exception)
+            {
+                // if the system gets mad, best to leave it alone.
+            }
+	    
+            Application.Current.MainWindow = new Window();
+            try
+            {
+                Log.Info("Checking if admin");
+                var isAdmin = UacHelper.IsProcessElevated && UacHelper.IsUacEnabled;
+                if (isAdmin)
+                {
+                    MessageBox.Show(
+                        "You are currently running OCTGN as Administrator. It is recommended that you run as a standard user, or you will most likely run into problems. Please exit OCTGN and run as a standard user.",
+                        "WARNING",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Exclamation);
+                }
             }
             catch (Exception e)
             {
-                DebugTrace.TraceEvent(TraceEventType.Error, 0, e.StackTrace);
+                Log.Warn("Couldn't check if admin", e);
             }
-#endif
+            
+            Log.Info("Creating Lobby Client");
+            LobbyClient = new Skylabs.Lobby.Client(LobbyConfig.Get());
+            Log.Info("Adding trace listeners");
+            Debug.Listeners.Add(DebugListener);
+            DebugTrace.Listeners.Add(DebugListener);
+            Trace.Listeners.Add(DebugListener);
+            //BasePath = Path.GetDirectoryName(typeof (Program).Assembly.Location) + '\\';
+            Log.Info("Setting Games Path");
         }
 
+        internal static void Start(string[] args)
+        {
+            //var win = new ShareDeck();
+            //win.ShowDialog();
+            //return;
+			var launcher = CommandLineHandler.Instance.HandleArguments(Environment.GetCommandLineArgs());
+            launcher.Launch();
+            if (launcher.Shutdown)
+            {
+				if(Application.Current.MainWindow != null)
+					Application.Current.MainWindow.Close();
+                return;
+            }
+        }
+
+        internal static void FireOptionsChanged()
+        {
+            if(OnOptionsChanged != null)
+                OnOptionsChanged.Invoke();
+        }
+
+        internal static void StartGame()
+        {
+            try
+            {
+                // Reset the InvertedTable flags if they were set and they are not used
+                if (!Program.GameSettings.UseTwoSidedTable)
+                    foreach (Player player in Player.AllExceptGlobal)
+                        player.InvertedTable = false;
+
+                // At start the global items belong to the player with the lowest id
+                if (Player.GlobalPlayer != null)
+                {
+                    Player host = Player.AllExceptGlobal.OrderBy(p => p.Id).First();
+                    foreach (Octgn.Play.Group group in Player.GlobalPlayer.Groups)
+                        group.Controller = host;
+                }
+                if (WindowManager.PlayWindow != null) return;
+                Program.Client.Rpc.Start();
+                WindowManager.PlayWindow = new PlayWindow(Program.GameEngine.IsLocal);
+                WindowManager.PlayWindow.Show();
+                if (WindowManager.PreGameLobbyWindow != null)
+                    WindowManager.PreGameLobbyWindow.Close();
+
+            }
+            catch (Exception e)
+            {
+                TopMostMessageBox.Show(
+                    "Could not start game, there was an error with the specific game. Please contact the game developer");
+                Log.Warn("StartGame Error",e);
+            }
+        }
         public static void StopGame()
         {
+            try
+            {
+                Program.Client.Rpc.Leave(Player.LocalPlayer);
+            }
+            catch
+            {
+
+            }
             if (Client != null)
             {
-                Client.Disconnect();
+                Client.ForceDisconnect();
                 Client = null;
             }
-            Game.End();
-            Game = null;
+            if(GameEngine != null)
+                GameEngine.End();
+            GameEngine = null;
             Dispatcher = null;
-            Database.Close();
             IsGameRunning = false;
-        }
-
-        public static void SaveLocation()
-        {
-            if (_locationUpdating) return;
-            if (LauncherWindow == null || !LauncherWindow.IsLoaded) return;
-            _locationUpdating = true;
-            SimpleConfig.WriteValue("LoginLeftLoc", LauncherWindow.Left.ToString(CultureInfo.InvariantCulture));
-            SimpleConfig.WriteValue("LoginTopLoc", LauncherWindow.Top.ToString(CultureInfo.InvariantCulture));
-            _locationUpdating = false;
         }
 
         public static void Exit()
         {
+            try{SSLHelper.Dispose();}catch{}
+            Sounds.Close();
+            try
+            {
+                Program.Client.Rpc.Leave(Player.LocalPlayer);
+            }
+            catch
+            {
+
+            }
+            UpdateManager.Instance.Stop();
+            LogManager.Shutdown();
+            Application.Current.Dispatcher.Invoke(new Action(() => { 
             Application.Current.MainWindow = null;
-            if (LClient != null)
-                LClient.Xmpp.Close();
+            if (LobbyClient != null)
+                LobbyClient.Stop();
 
-            SaveLocation();
             try
             {
-                if (DebugWindow != null)
-                    if (DebugWindow.IsLoaded)
-                        DebugWindow.Close();
+                if (WindowManager.DebugWindow != null)
+                    if (WindowManager.DebugWindow.IsLoaded)
+                        WindowManager.DebugWindow.Close();
             }
             catch (Exception e)
             {
                 Debug.WriteLine(e);
                 if (Debugger.IsAttached) Debugger.Break();
             }
-            if (LauncherWindow != null)
-                if (LauncherWindow.IsLoaded)
-                    LauncherWindow.Close();
-            if (ClientWindow != null)
-                if (ClientWindow.IsLoaded)
-                    ClientWindow.Close();
-            if (PlayWindow != null)
-                if (PlayWindow.IsLoaded)
-                    PlayWindow.Close();
             try
             {
-                foreach (ChatWindow cw in ChatWindows.Where(cw => cw.IsLoaded))
+                foreach (var w in WindowManager.ChatWindows.ToArray())
                 {
-                    cw.CloseChatWindow();
+                    try
+                    {
+                        if (w.IsLoaded) w.CloseDown();
+                        w.Dispose();
+                    }
+                    catch(Exception e)
+                    {
+                        Log.Warn("Close chat window error", e);
+                    }
                 }
+                WindowManager.ChatWindows = new ConcurrentBag<ChatWindow>();
             }
             catch (Exception e)
             {
-                Debug.WriteLine(e);
-                if (Debugger.IsAttached) Debugger.Break();
+                Log.Warn("Close chat window enumerate error",e);
             }
+            if (WindowManager.PlayWindow != null)
+                if (WindowManager.PlayWindow.IsLoaded)
+                    WindowManager.PlayWindow.Close();
+            //Apparently this can be null sometimes?
+            if(Application.Current != null)
+                Application.Current.Shutdown(0);
+           }));
 
-#if(DEBUG)
-            if (_lobbyServerProcess != null)
-            {
-                try
-                {
-                    if (!_lobbyServerProcess.HasExited)
-                        _lobbyServerProcess.Kill();
-                }
-                catch (Exception e)
-                {
-                    Debug.WriteLine(e);
-                    if (Debugger.IsAttached) Debugger.Break();
-                }
-            }
-#endif
-            Application.Current.Shutdown(0);
         }
 
         internal static void Print(Player player, string text)
@@ -203,7 +246,7 @@ namespace Octgn
             while (match.Success)
             {
                 string token = match.Groups[1].Value;
-                finalText = finalText.Replace(match.Groups[0].Value, "{" + i + "}");
+                finalText = finalText.Replace(match.Groups[0].Value, "##$$%%^^LEFTBRACKET^^%%$$##" + i + "##$$%%^^RIGHTBRACKET^^%%$$##");
                 i++;
                 object tokenValue = token;
                 switch (token)
@@ -227,6 +270,9 @@ namespace Octgn
                 match = match.NextMatch();
             }
             args.Add(player);
+            finalText = finalText.Replace("{", "").Replace("}", "");
+            finalText = finalText.Replace("##$$%%^^LEFTBRACKET^^%%$$##", "{").Replace(
+                "##$$%%^^RIGHTBRACKET^^%%$$##", "}");
             Trace.TraceEvent(TraceEventType.Information,
                              EventIds.Event | EventIds.PlayerFlag(player) | EventIds.Explicit, finalText, args.ToArray());
         }
@@ -240,12 +286,117 @@ namespace Octgn
 
         internal static void TraceWarning(string message)
         {
+            if (message == null) message = "";
+            if (Trace == null) return;
             Trace.TraceEvent(TraceEventType.Warning, EventIds.NonGame, message);
         }
 
         internal static void TraceWarning(string message, params object[] args)
         {
+            if (message == null) message = "";
+            if (Trace == null) return;
             Trace.TraceEvent(TraceEventType.Warning, EventIds.NonGame, message, args);
+        }
+
+        public static void LaunchUrl(string url)
+        {
+            if (url == null) return;
+            if (GetDefaultBrowserPath() == null)
+            {
+                Dispatcher d = Dispatcher;
+                if (d == null) d = Application.Current.Dispatcher;
+                if (d == null) d = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+                if (d == null && Application.Current != null && Application.Current.MainWindow != null) d = Application.Current.MainWindow.Dispatcher;
+                if (d == null) return;
+                d.Invoke(new Action(() => new BrowserWindow(url).Show()));
+                return;
+            }
+            Process.Start(url);
+        }
+
+        public static void LaunchApplication(string path, params string[] args)
+        {
+            var psi = new ProcessStartInfo(path, String.Join(" ", args));
+            try
+            {
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+            }
+            catch (Win32Exception e)
+            {
+                if (e.NativeErrorCode != 1223)
+                    Log.Warn("LaunchApplication Error " + path + " " + psi.Arguments,e);
+            }
+            catch (Exception e)
+            {
+                Log.Warn("LaunchApplication Error " + path + " " + psi.Arguments,e);
+            }
+            
+        }
+
+        public static string GetDefaultBrowserPath()
+        {
+            string defaultBrowserPath = null;
+            try
+            {
+                RegistryKey regkey;
+
+                // Check if we are on Vista or Higher
+                OperatingSystem OS = Environment.OSVersion;
+                if ((OS.Platform == PlatformID.Win32NT) && (OS.Version.Major >= 6))
+                {
+                    regkey = Registry.CurrentUser.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\shell\\Associations\\UrlAssociations\\http\\UserChoice", false);
+                    if (regkey != null)
+                    {
+                        defaultBrowserPath = regkey.GetValue("Progid").ToString();
+                    }
+                    else
+                    {
+                        regkey = Registry.LocalMachine.OpenSubKey("SOFTWARE\\Classes\\IE.HTTP\\shell\\open\\command", false);
+                        defaultBrowserPath = regkey.GetValue("").ToString();
+                    }
+                }
+                else
+                {
+                    regkey = Registry.ClassesRoot.OpenSubKey("http\\shell\\open\\command", false);
+                    defaultBrowserPath = regkey.GetValue("").ToString();
+                }
+
+                
+
+            }
+            catch (Exception e)
+            {
+                Log.Error(e);
+            }
+            return defaultBrowserPath;
+        }
+
+        public static void DoCrazyException(Exception e, string action)
+        {
+            var res = TopMostMessageBox.Show(action + Environment.NewLine + Environment.NewLine + "Are you going to be ok?", "Oh No!",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (res == MessageBoxResult.No)
+            {
+                res = TopMostMessageBox.Show(
+                    "There there...It'll all be alright..." + Environment.NewLine + Environment.NewLine +
+                    "Do you feel that we properly comforted you in this time of great sorrow?", "Comfort Dialog",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (res == MessageBoxResult.Yes)
+                {
+                    TopMostMessageBox.Show(
+                        "Great! Maybe you could swing by my server room later and we can hug it out.",
+                        "Inappropriate Gesture Dialog", MessageBoxButton.OK, MessageBoxImage.Question);
+                    TopMostMessageBox.Show("I'll be waiting...", "Creepy Dialog Box", MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+                else if (res == MessageBoxResult.No)
+                {
+                    TopMostMessageBox.Show(
+                        "Ok. We will sack the person responsible for that not so comforting message. Have a nice day!",
+                        "Repercussion Dialog", MessageBoxButton.OK, MessageBoxImage.Exclamation);
+                }
+            }
         }
     }
 }

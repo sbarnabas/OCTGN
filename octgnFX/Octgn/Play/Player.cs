@@ -3,31 +3,43 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Reflection;
 using System.Windows.Media;
-using Octgn.Definitions;
+using log4net;
 
 namespace Octgn.Play
 {
+    using System.Windows;
+
+    using Octgn.Core.Play;
+
     public sealed class Player : INotifyPropertyChanged
     {
+        internal static ILog Log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
         #region Static members
 
         // Contains all players in this game (TODO: Rename to All, then cleanup all the dependancies)
         private static readonly ObservableCollection<Player> all = new ObservableCollection<Player>();
+
+        private static readonly ObservableCollection<Player> allExceptGlobal = new ObservableCollection<Player>();
+
         public static Player LocalPlayer;
         // May be null if there's no global lPlayer in the game definition
         public static Player GlobalPlayer;
 
         // Get all players in the game
-        public static IEnumerable<Player> All
+        public static ObservableCollection<Player> All
         {
             get { return all; }
         }
 
         // Get all players in the game, except a possible Global lPlayer
-        public static IEnumerable<Player> AllExceptGlobal
+        public static ObservableCollection<Player> AllExceptGlobal
         {
-            get { return All.Where(p => p != GlobalPlayer); }
+            get
+            {
+                return allExceptGlobal;
+            }
         }
 
         // Number of players
@@ -45,8 +57,20 @@ namespace Octgn.Play
         // Resets the lPlayer list
         internal static void Reset()
         {
-            all.Clear();
-            LocalPlayer = GlobalPlayer = null;
+            lock (all)
+            {
+                all.Clear();
+                LocalPlayer = GlobalPlayer = null;
+            }
+        }
+
+
+
+        public static event Action OnLocalPlayerWelcomed;
+        public static void FireLocalPlayerWelcomed()
+        {
+            if(OnLocalPlayerWelcomed != null)
+                OnLocalPlayerWelcomed.Invoke();
         }
 
         // May be null if we're in pure server mode
@@ -59,6 +83,7 @@ namespace Octgn.Play
         #region Public fields and properties
 
         internal readonly ulong PublicKey; // Public cryptographic key
+        internal readonly double minHandSize;
         private readonly Counter[] _counters; // Counters this lPlayer owns
 
         private readonly Group[] _groups; // Groups this lPlayer owns
@@ -67,6 +92,43 @@ namespace Octgn.Play
         private Brush _transparentBrush;
         private bool _invertedTable;
         private string _name;
+        private byte _id;
+        private bool _ready;
+
+        private PlayerState state;
+
+        public bool WaitingOnPlayers
+        {
+            get
+            {
+                var ret = AllExceptGlobal.Any(x => !x.Ready);
+                Log.Debug("WaitingOnPlayers Checking Players Ready Status");
+                foreach (var p in AllExceptGlobal)
+                {
+                    Log.DebugFormat("Player {0} Ready={1}", p.Name, p.Ready);
+                }
+                Log.DebugFormat("WaitingOnPlayers = {0}", ret);
+                Log.Debug("WaitingOnPlayers Done Checking Players Ready Status");
+                return ret;
+            }
+        }
+
+        public bool Ready
+        {
+            get
+            {
+                return _ready && (state == PlayerState.Connected || state == PlayerState.Disconnected);
+            }
+            set
+            {
+                //if (value == _ready) return;
+                _ready = value;
+                Log.DebugFormat("Player {0} Ready = {1}", this.Name, value);
+                this.OnPropertyChanged("Ready");
+                foreach(var p in all)
+                    p.OnPropertyChanged("WaitingOnPlayers");
+            }
+        }
 
         public Counter[] Counters
         {
@@ -92,7 +154,15 @@ namespace Octgn.Play
         }
 
         public byte Id // Identifier
-        { get; set; }
+        {
+            get { return _id; }
+            set
+            {
+                if (_id == value) return;
+                _id = value;
+                OnPropertyChanged("Id");
+            }
+        }
 
         public string Name // Nickname
         {
@@ -109,22 +179,22 @@ namespace Octgn.Play
         {
             get { return Id == 0; }
         }
-
+		
+		/// <summary>
+		/// True if the lPlayer plays on the opposite side of the table (for two-sided table only)
+		/// </summary>
         public bool InvertedTable
-            // True if the lPlayer plays on the opposite side of the table (for two-sided table only)
         {
             get { return _invertedTable; }
             set
             {
+                Log.InfoFormat("[InvertedTable]{0} {1}",this,value);
                 if (_invertedTable == value) return;
                 _invertedTable = value;
                 OnPropertyChanged("InvertedTable");
-
-                if (Program.IsHost) // If we are the host, we are setting this option for everyone
-                    Program.Client.Rpc.PlayerSettings(this, value);
+                Program.Client.Rpc.PlayerSettings(this, value);
             }
         }
-
 
         //Color for the chat.
         // Associated color
@@ -143,6 +213,24 @@ namespace Octgn.Play
             set { _transparentBrush = value; }
         }
 
+        public PlayerState State
+        {
+            get
+            {
+                return this.state;
+            }
+            set
+            {
+                if (value == this.state) return;
+                Log.DebugFormat("Player {0} State = {1}", this.Name, value);
+                this.state = value;
+                this.OnPropertyChanged("State");
+                this.OnPropertyChanged("Ready");
+                foreach (var p in all)
+                    p.OnPropertyChanged("WaitingOnPlayers");
+            }
+        }
+
         //Set the player's color based on their id.
         public void SetPlayerColor(int idx)
         {
@@ -153,19 +241,19 @@ namespace Octgn.Play
                                      Color.FromRgb(0x66, 0x00, 0x00),
                                      Color.FromRgb(0x00, 0x00, 0x66),
                                      Color.FromRgb(0x66, 0x00, 0x66),
-                                     Color.FromRgb(0xFF, 0x66, 0x00),
-                                     Color.FromRgb(0x00, 0x00, 0x00),
+                                     Color.FromRgb(0x99, 0x66, 0x00),
+                                     Color.FromRgb(0x33, 0x00, 0x33),
                                      Color.FromRgb(0x00, 0x99, 0x00),
                                      Color.FromRgb(0x99, 0x00, 0x00),
                                      Color.FromRgb(0x00, 0x00, 0x99),
                                      Color.FromRgb(0x99, 0x00, 0x99),
-                                     Color.FromRgb(0xFF, 0x99, 0x00),
+                                     Color.FromRgb(0x00, 0x99, 0x99),
                                      Color.FromRgb(0x33, 0x33, 0x33),
-                                     Color.FromRgb(0x00, 0x99, 0x00),
-                                     Color.FromRgb(0x99, 0x00, 0x00),
-                                     Color.FromRgb(0x00, 0x00, 0x99),
-                                     Color.FromRgb(0x99, 0x00, 0x99),
-                                     Color.FromRgb(0xFF, 0x99, 0x00),
+                                     Color.FromRgb(0xFF, 0x00, 0xFF),
+                                     Color.FromRgb(0x00, 0x00, 0xFF),
+                                     Color.FromRgb(0x33, 0x00, 0x99),
+                                     Color.FromRgb(0x99, 0x00, 0x33),
+                                     Color.FromRgb(0x00, 0x66, 0x66),
                                      Color.FromRgb(0x66, 0x66, 0x66),
                                      Color.FromRgb(0xFF, 0x00, 0x00)
                                  };
@@ -189,48 +277,73 @@ namespace Octgn.Play
 
         #region Public interface
 
-        // C'tor
-        internal Player(GameDef g, string name, byte id, ulong pkey)
+        internal void SetupPlayer()
         {
+            all.CollectionChanged += (sender, args) =>
+            {
+                allExceptGlobal.Clear();
+                foreach (var p in all.ToArray().Where(x => x != Player.GlobalPlayer))
+                {
+                    allExceptGlobal.Add(p);
+                }
+            };            
+            State = PlayerState.Connected;
+        }
+
+        // C'tor
+        internal Player(DataNew.Entities.Game g, string name, byte id, ulong pkey)
+        {
+            SetupPlayer();
             // Init fields
             _name = name;
             Id = id;
             PublicKey = pkey;
             // Register the lPlayer
-            all.Add(this);
+            Application.Current.Dispatcher.Invoke(new Action(()=>all.Add(this)));
             //Create the color brushes           
             SetPlayerColor(id);
             // Create counters
-            _counters = new Counter[g.PlayerDefinition.Counters != null ? g.PlayerDefinition.Counters.Length : 0];
-            for (int i = 0; i < Counters.Length; i++)
-                if (g.PlayerDefinition.Counters != null)
-                    Counters[i] = new Counter(this, g.PlayerDefinition.Counters[i]);
+            _counters = new Counter[0];
+            if (g.Player.Counters != null)
+                _counters = g.Player.Counters.Select(x =>new Counter(this, x) ).ToArray();
             // Create variables
             Variables = new Dictionary<string, int>();
-            foreach (VariableDef varDef in g.Variables.Where(v => !v.Global))
-                Variables.Add(varDef.Name, varDef.DefaultValue);
+            foreach (var varDef in g.Variables.Where(v => !v.Global))
+                Variables.Add(varDef.Name, varDef.Default);
             // Create global variables
             GlobalVariables = new Dictionary<string, string>();
-            foreach (GlobalVariableDef varD in g.PlayerDefinition.GlobalVariables)
+            foreach (var varD in g.Player.GlobalVariables)
                 GlobalVariables.Add(varD.Name, varD.Value);
             // Create a hand, if any
-            if (g.PlayerDefinition.Hand != null)
-                _hand = new Hand(this, g.PlayerDefinition.Hand);
+            if (g.Player.Hand != null)
+                _hand = new Hand(this, g.Player.Hand);
             // Create groups
-            _groups = new Group[g.PlayerDefinition.Groups != null ? g.PlayerDefinition.Groups.Length + 1 : 1];
-            _groups[0] = _hand;
-            for (int i = 1; i < IndexedGroups.Length; i++)
-                if (g.PlayerDefinition.Groups != null) _groups[i] = new Pile(this, g.PlayerDefinition.Groups[i - 1]);
+            _groups = new Group[0];
+            if (g.Player.Groups != null)
+            {
+                var tempGroups = g.Player.Groups.ToArray();
+                _groups = new Group[tempGroups.Length + 1];
+                _groups[0] = _hand;
+                for (int i = 1; i < IndexedGroups.Length; i++)
+                    _groups[i] = new Pile(this, tempGroups[i - 1]);
+            }
             // Raise the event
             if (PlayerAdded != null) PlayerAdded(null, new PlayerEventArgs(this));
+            Ready = false;
+            OnPropertyChanged("All");
+            OnPropertyChanged("AllExceptGlobal");
+            OnPropertyChanged("Count");
+            minHandSize = 250;
         }
 
         // C'tor for global items
-        internal Player(GameDef g)
+        internal Player(DataNew.Entities.Game g)
         {
-            SharedDef globalDef = g.GlobalDefinition;
+            SetupPlayer();
+            var globalDef = g.GlobalPlayer;
             // Register the lPlayer
-            all.Add(this);
+            lock(all)
+                all.Add(this);
             // Init fields
             _name = "Global";
             Id = 0;
@@ -239,25 +352,37 @@ namespace Octgn.Play
             {
                 // Create global variables
                 GlobalVariables = new Dictionary<string, string>();
-                foreach (GlobalVariableDef varD in g.PlayerDefinition.GlobalVariables)
+                foreach (var varD in g.Player.GlobalVariables)
                     GlobalVariables.Add(varD.Name, varD.Value);
             }
             // Create counters
-            _counters = new Counter[globalDef.Counters != null ? globalDef.Counters.Length : 0];
-            for (int i = 0; i < Counters.Length; i++)
-                if (globalDef.Counters != null) Counters[i] = new Counter(this, globalDef.Counters[i]);
+            _counters = new Counter[0];
+            if (globalDef.Counters != null)
+                _counters = globalDef.Counters.Select(x => new Counter(this, x)).ToArray();
             // Create global's lPlayer groups
             // TODO: This could fail with a run-time exception on write, make it safe
-            _groups = new Pile[globalDef.Groups != null ? g.GlobalDefinition.Groups.Length + 1 : 0];
-            for (int i = 1; i < IndexedGroups.Length; i++)
-                if (globalDef.Groups != null) _groups[i] = new Pile(this, globalDef.Groups[i - 1]);
+            // I don't know if the above todo is still relevent - Kelly Elton - 3/18/2013
+            if (globalDef.Groups != null)
+            {
+                var tempGroups = globalDef.Groups.ToArray();
+                _groups = new Group[tempGroups.Length + 1];
+                _groups[0] = _hand;
+                for (int i = 1; i < IndexedGroups.Length; i++)
+                    _groups[i] = new Pile(this, tempGroups[i - 1]);
+            }
+            OnPropertyChanged("All");
+            OnPropertyChanged("AllExceptGlobal");
+            OnPropertyChanged("Count");
+            minHandSize = 0;
         }
 
         // Remove the lPlayer from the game
         internal void Delete()
         {
+            
             // Remove from the list
-            all.Remove(this);
+            lock(all)
+                all.Remove(this);
             // Raise the event
             if (PlayerRemoved != null) PlayerRemoved(null, new PlayerEventArgs(this));
         }

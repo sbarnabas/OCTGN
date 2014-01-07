@@ -6,7 +6,6 @@
 *.ilk
 *.lib
 *.log
-*.exe
 *.ncb
 *.opensdf
 *.pch
@@ -24,6 +23,7 @@
 *_p.c
 *.orig
 .svn
+*.DotSettings
 /octgnFX/CassiniDev/CassiniDev/bin
 /octgnFX/CassiniDev/CassiniDev/obj
 /octgnFX/ConsoleHelper/bin
@@ -45,7 +45,6 @@
 /octgnFX/Skylabs.MultiLogin/obj
 /octgnFX/Webcontent/obj
 [Bb]in
-[Bb]uild/
 [Dd]ebug*/
 [Oo]bj
 [Rr]elease*/
@@ -58,10 +57,25 @@ Ankh.NoLoad
 ipch/
 obj/
 octgnFX/Webcontent/Bin
-packages/
 
 *.ctl
 *.vsp
 *.psess
 
-*.*~
+*.typemock
+*.ncrunchsolution
+octgn/_UpgradeReport_Files/*
+*.ncrunchproject
+octgn/UpgradeLog*.XML
+octgn/monotorrent/
+octgn/PeerSwarm/
+$tf*
+/octgnFX/Octgn/_TeamCity.OCTGN
+_TeamCity.OCTGN
+
+/*.jtconfig
+/deploy/*.swp
+/octgnFX/Octgn/Scripting/*.swp
+/octgnFX/Octgn/*.tmp_proj
+/installer/*.exe
+/.HistoryData

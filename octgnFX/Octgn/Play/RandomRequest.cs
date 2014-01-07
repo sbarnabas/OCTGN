@@ -2,9 +2,12 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using Octgn.Utils;
 
 namespace Octgn.Play
 {
+    using Octgn.Core.Util;
+
     public class RandomRequest
     {
         public readonly int Id;
@@ -28,7 +31,7 @@ namespace Octgn.Play
 
         public static int GenerateId()
         {
-            return (Player.LocalPlayer.Id << 16) | Program.Game.GetUniqueId();
+            return (Player.LocalPlayer.Id << 16) | Program.GameEngine.GetUniqueId();
         }
 
         public void Answer1()
@@ -64,7 +67,7 @@ namespace Octgn.Play
 
         public void Complete()
         {
-            Program.Game.RandomRequests.Remove(this);
+            Program.GameEngine.RandomRequests.Remove(this);
 
             if (_max < _min)
             {

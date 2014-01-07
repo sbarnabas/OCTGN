@@ -11,6 +11,10 @@ using Octgn.Scripting;
 
 namespace Octgn.Play.Dialogs
 {
+    using System.IO;
+
+    using Octgn.Core;
+
     public partial class InteractiveConsole
     {
 #pragma warning disable 649   // Unassigned variable: it's initialized by MEF
@@ -26,8 +30,8 @@ namespace Octgn.Play.Dialogs
         public InteractiveConsole()
         {
             InitializeComponent();
-            Program.Game.ComposeParts(this);
-            _scope = _scriptEngine.CreateScope();
+            Program.GameEngine.ComposeParts(this);
+            _scope = _scriptEngine.CreateScope(Path.Combine(Prefs.DataDirectory, "GameDatabase", Program.GameEngine.Definition.Id.ToString()));
 
             Loaded += (s, a) => prompt.Focus();
         }

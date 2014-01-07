@@ -3,8 +3,15 @@ using System.Diagnostics;
 
 namespace Octgn.Play.Actions
 {
+    using System.Reflection;
+
+    using log4net;
+
     internal class MoveCard : ActionBase
     {
+        internal static ILog Log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+
+        
         internal Card Card;
         internal bool FaceUp;
         internal Group From;
@@ -14,7 +21,9 @@ namespace Octgn.Play.Actions
         //        private int fromIdx;
         internal int X, Y;
 
-        public MoveCard(Player who, Card card, Group to, int idx, bool faceUp)
+        internal bool IsScriptMove;
+
+        public MoveCard(Player who, Card card, Group to, int idx, bool faceUp, bool isScriptMove)
         {
             Who = who;
             Card = card;
@@ -22,18 +31,20 @@ namespace Octgn.Play.Actions
             From = card.Group;
             Idx = idx;
             FaceUp = faceUp;
+            IsScriptMove = isScriptMove;
         }
 
-        public MoveCard(Player who, Card card, int x, int y, int idx, bool faceUp)
+        public MoveCard(Player who, Card card, int x, int y, int idx, bool faceUp, bool isScriptMove)
         {
             Who = who;
             Card = card;
-            To = Program.Game.Table;
+            To = Program.GameEngine.Table;
             From = card.Group;
             X = x;
             Y = y;
             Idx = idx;
             FaceUp = faceUp;
+            IsScriptMove = isScriptMove;
         }
 
         internal static event EventHandler Done;
@@ -43,26 +54,46 @@ namespace Octgn.Play.Actions
         {
             if (Doing != null) Doing(this, EventArgs.Empty);
 
+            if (Card == null) return;
+
+            if (To == null)
+            {
+                Log.DebugFormat("To == null {0}", Card.Id);
+                return;
+            }
+
+            if (Card.Group == null)
+            {
+                Log.DebugFormat("Card.Group == null {0}", Card.Id);
+                return;
+            }
+
             base.Do();
 #if(DEBUG)
             Debug.WriteLine("Moving " + Card.Name + " from " + From + " to " + To);
 #endif
             bool shouldSee = Card.FaceUp, shouldLog = true;
+            var oldGroup = Card.Group;
+            var oldIndex = Card.GetIndex();
+            var oldX = (int)Card.X;
+            var oldY = (int)Card.Y;
             // Move the card
             if (Card.Group != To)
             {
+
                 Card.Group.Remove(Card);
                 if (Card.DeleteWhenLeavesGroup)
                     Card.Group = null;
                     //TODO Card.Delete();
                 else
                 {
-                    if (Program.Game.Definition.CardsRevertToOriginalOnGroupChange) { Card.RevertToOriginal(); }
+                    Card.SwitchTo(Who);
                     Card.SetFaceUp(FaceUp);//FaceUp may be false - it's one of the constructor parameters for this
                     Card.SetOverrideGroupVisibility(false);
                     Card.X = X;
                     Card.Y = Y;
                     To.AddAt(Card, Idx);
+                    Program.GameEngine.EventProxy.OnMoveCard(Who,Card,oldGroup,To,oldIndex,Idx,oldX,oldY,X,Y, IsScriptMove);
                 }
             }
             else
@@ -77,6 +108,7 @@ namespace Octgn.Play.Actions
                                                  "{0} reorders {1}", Who, To);
                     Card.SetIndex(Idx);
                 }
+                Program.GameEngine.EventProxy.OnMoveCard(Who,Card,oldGroup,To,oldIndex,Idx,oldX,oldY,X,Y,IsScriptMove);
             }
             // Should the card be named in the log ?
             shouldSee |= Card.FaceUp;
